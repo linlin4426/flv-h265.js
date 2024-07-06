@@ -31,7 +31,8 @@ class MP4 {
             stco: [], stsc: [], stsd: [], stsz: [],
             stts: [], tfdt: [], tfhd: [], traf: [],
             trak: [], trun: [], trex: [], tkhd: [],
-            vmhd: [], smhd: [], pasp: [], '.mp3': []
+            vmhd: [], smhd: [], pasp: [], '.mp3': [],
+            Opus: [], dOps: [],
         };
 
         for (let name in MP4.types) {
@@ -312,8 +313,8 @@ class MP4 {
             MP4.box(MP4.types.stsc, MP4.constants.STSC),  // Sample-To-Chunk
             MP4.box(MP4.types.stsz, MP4.constants.STSZ),  // Sample size
             MP4.box(MP4.types.stco, MP4.constants.STCO)   // Chunk offset
-        ); 
-        return result; 
+        );
+        return result;
     }
 
     // Sample description box
@@ -321,6 +322,8 @@ class MP4 {
         if (meta.type === 'audio') {
             if (meta.codec === 'mp3') {
                 return MP4.box(MP4.types.stsd, MP4.constants.STSD_PREFIX, MP4.mp3(meta));
+            } else if(meta.codec === 'opus') {
+                return MP4.box(MP4.types.stsd, MP4.constants.STSD_PREFIX, MP4.Opus(meta));
             }
             // else: aac -> mp4a
             return MP4.box(MP4.types.stsd, MP4.constants.STSD_PREFIX, MP4.mp4a(meta));
@@ -373,6 +376,102 @@ class MP4 {
         ]);
 
         return MP4.box(MP4.types.mp4a, data, MP4.esds(meta));
+    }
+
+    static Opus(meta) {
+        let channelCount = meta.channelCount;
+        let sampleRate = meta.audioSampleRate;
+
+        let data = new Uint8Array([
+            0x00, 0x00, 0x00, 0x00,  // reserved(4)
+            0x00, 0x00, 0x00, 0x01,  // reserved(2) + data_reference_index(2)
+            0x00, 0x00, 0x00, 0x00,  // reserved: 2 * 4 bytes
+            0x00, 0x00, 0x00, 0x00,
+            0x00, channelCount,      // channelCount(2)
+            0x00, 0x10,              // sampleSize(2)
+            0x00, 0x00, 0x00, 0x00,  // reserved(4)
+            (sampleRate >>> 8) & 0xFF,  // Audio sample rate
+            (sampleRate) & 0xFF,
+            0x00, 0x00
+        ]);
+
+        return MP4.box(MP4.types.Opus, data, MP4.dOps(meta));
+    }
+
+    static dOps(meta) {
+        let channelCount = meta.channelCount;
+        let channelConfigCode = meta.channelConfigCode;
+        let sampleRate = meta.audioSampleRate;
+
+        if (meta.config) {
+            return MP4.box(MP4.types.dOps, meta.config);
+        }
+
+        let mapping = [];
+        switch (channelConfigCode) {
+            case 0x01:
+            case 0x02:
+                mapping = [0x0];
+                break;
+            case 0x00: // dualmono
+                mapping = [0xFF, 1, 1, 0, 1];
+                break;
+            case 0x80: // dualmono
+                mapping = [0xFF, 2, 0, 0, 1];
+                break;
+            case 0x03:
+                mapping = [0x01, 2, 1, 0, 2, 1];
+                break;
+            case 0x04:
+                mapping = [0x01, 2, 2, 0, 1, 2, 3];
+                break;
+            case 0x05:
+                mapping = [0x01, 3, 2, 0, 4, 1, 2, 3];
+                break;
+            case 0x06:
+                mapping = [0x01, 4, 2, 0, 4, 1, 2, 3, 5];
+                break;
+            case 0x07:
+                mapping = [0x01, 4, 2, 0, 4, 1, 2, 3, 5, 6];
+                break;
+            case 0x08:
+                mapping = [0x01, 5, 3, 0, 6, 1, 2, 3, 4, 5, 7];
+                break;
+            case 0x82:
+                mapping = [0x01, 1, 2, 0, 1];
+                break;
+            case 0x83:
+                mapping = [0x01, 1, 3, 0, 1, 2];
+                break;
+            case 0x84:
+                mapping = [0x01, 1, 4, 0, 1, 2, 3];
+                break;
+            case 0x85:
+                mapping = [0x01, 1, 5, 0, 1, 2, 3, 4];
+                break;
+            case 0x86:
+                mapping = [0x01, 1, 6, 0, 1, 2, 3, 4, 5];
+                break;
+            case 0x87:
+                mapping = [0x01, 1, 7, 0, 1, 2, 3, 4, 5, 6];
+                break;
+            case 0x88:
+                mapping = [0x01, 1, 8, 0, 1, 2, 3, 4, 5, 6, 7];
+                break;
+        }
+
+        let data = new Uint8Array([
+            0x00,         // Version (1)
+            channelCount, // OutputChannelCount: 2
+            0x00, 0x00,   // PreSkip: 2
+            (sampleRate >>> 24) & 0xFF,  // Audio sample rate: 4
+            (sampleRate >>> 17) & 0xFF,
+            (sampleRate >>>  8) & 0xFF,
+            (sampleRate >>>  0) & 0xFF,
+            0x00, 0x00,  // Global Gain : 2
+            ... mapping
+        ]);
+        return MP4.box(MP4.types.dOps, data);
     }
 
     static esds(meta) {
