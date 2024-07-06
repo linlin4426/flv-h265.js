@@ -500,9 +500,11 @@ class FLVDemuxer {
             let packetType = soundSpec & 0x0F;
             let fourcc = String.fromCharCode(... (new Uint8Array(arrayBuffer, dataOffset, dataSize)).slice(1, 5));
 
-            if (fourcc === 'Opus') {
+            switch(fourcc){
+            case 'Opus':
                 this._parseOpusAudioPacket(arrayBuffer, dataOffset + 5, dataSize - 5, tagTimestamp, packetType);
-            } else {
+                break;
+            default:
                 this._onError(DemuxErrors.CODEC_UNSUPPORTED, 'Flv: Unsupported audio codec: ' + fourcc);
             }
 
@@ -554,7 +556,13 @@ class FLVDemuxer {
 
             if (aacData.packetType === 0) {  // AAC sequence header (AudioSpecificConfig)
                 if (meta.config) {
-                    Log.w(this.TAG, 'Found another AudioSpecificConfig!');
+                    if (buffersAreEqual(aacData.data.config, meta.config)) {
+                        // If AudioSpecificConfig is not changed, ignore it to avoid generating initialization segment repeatedly
+                        Log.w(this.TAG, 'Found another AudioSpecificConfig!');
+                        return;
+                    } else {
+                        Log.w(this.TAG, 'AudioSpecificConfig has been changed, re-generate initialization segment');
+                    }
                 }
                 let misc = aacData.data;
                 meta.audioSampleRate = misc.samplingRate;
@@ -846,108 +854,109 @@ class FLVDemuxer {
 
     _parseOpusAudioPacket(arrayBuffer, dataOffset, dataSize, tagTimestamp, packetType) {
         if (packetType === 0) {  // OpusSequenceHeader
-             this._parseOpusSequenceHeader(arrayBuffer, dataOffset, dataSize);
-         } else if (packetType === 1) {  // OpusCodedData
-             this._parseOpusAudioData(arrayBuffer, dataOffset, dataSize, tagTimestamp);
-         } else if (packetType === 2) {
-             // empty, Opus end of sequence
-         } else {
-             this._onError(DemuxErrors.FORMAT_ERROR, `Flv: Invalid video packet type ${packetType}`);
-             return;
-         }
-     }
+            this._parseOpusSequenceHeader(arrayBuffer, dataOffset, dataSize);
+        } else if (packetType === 1) {  // OpusCodedData
+            this._parseOpusAudioData(arrayBuffer, dataOffset, dataSize, tagTimestamp);
+        } else if (packetType === 2) {
+            // empty, Opus end of sequence
+        } else {
+            this._onError(DemuxErrors.FORMAT_ERROR, `Flv: Invalid video packet type ${packetType}`);
+            return;
+        }
+    }
+
+    _parseOpusSequenceHeader(arrayBuffer, dataOffset, dataSize) {
+        if (dataSize <= 16) {
+            Log.w(this.TAG, 'Flv: Invalid OpusSequenceHeader, lack of data!');
+            return;
+        }
+        let meta = this._audioMetadata;
+        let track = this._audioTrack;
  
-     _parseOpusSequenceHeader(arrayBuffer, dataOffset, dataSize) {
-         if (dataSize <= 16) {
-             Log.w(this.TAG, 'Flv: Invalid OpusSequenceHeader, lack of data!');
-             return;
-         }
-         let meta = this._audioMetadata;
-         let track = this._audioTrack;
- 
-         if (!meta) {
-             if (this._hasAudio === false && this._hasAudioFlagOverrided === false) {
-                 this._hasAudio = true;
-                 this._mediaInfo.hasAudio = true;
-             }
- 
-             // initial metadata
-             meta = this._audioMetadata = {};
-             meta.type = 'audio';
-             meta.id = track.id;
-             meta.timescale = this._timescale;
-             meta.duration = this._duration;
-         }
- 
-         // Identification Header
-         let v = new DataView(arrayBuffer, dataOffset, dataSize);
-         v.setUint8(8 + 0, 0); // set version to 0
-         let channelCount = v.getUint8(8 + 1); // Opus Header + 1
-         v.setUint16(8 + 2, v.getUint16(8 + 2, true), false); // Big Endian to Little Endian for Pre-skip
-         let samplingFrequence = v.getUint32(8 + 4, true); // Opus Header + 4
-         v.setUint32(8 + 4, v.getUint32(8 + 4, true), false); // Big Endian to Little Endian for Input Sample Rate
-         let config = new Uint8Array(arrayBuffer, dataOffset + 8, dataSize - 8);
- 
-         let misc = {
-             config,
-             channelCount,
-             samplingFrequence,
-             codec: 'opus',
-             originalCodec: 'opus',
-         };
-         if (meta.config) {
-             if (buffersAreEqual(misc.config, meta.config)) {
-                 // If OpusSequenceHeader is not changed, ignore it to avoid generating initialization segment repeatedly
-                 return;
-             } else {
-                 Log.w(this.TAG, 'OpusSequenceHeader has been changed, re-generate initialization segment');
-             }
-         }
-         meta.audioSampleRate = misc.samplingFrequence;
-         meta.channelCount = misc.channelCount;
-         meta.codec = misc.codec;
-         meta.originalCodec = misc.originalCodec;
-         meta.config = misc.config;
-         // The decode result of an opus sample is 20ms
-         meta.refSampleDuration = 20;
-         Log.v(this.TAG, 'Parsed OpusSequenceHeader');
- 
-         if (this._isInitialMetadataDispatched()) {
-             // Non-initial metadata, force dispatch (or flush) parsed frames to remuxer
-             if (this._dispatch && (this._audioTrack.length || this._videoTrack.length)) {
-                 this._onDataAvailable(this._audioTrack, this._videoTrack);
-             }
-         } else {
-             this._audioInitialMetadataDispatched = true;
-         }
-         // then notify new metadata
-         this._dispatch = false;
-         this._onTrackMetadata('audio', meta);
- 
-         let mi = this._mediaInfo;
-         mi.audioCodec = meta.originalCodec;
-         mi.audioSampleRate = meta.audioSampleRate;
-         mi.audioChannelCount = meta.channelCount;
-         if (mi.hasVideo) {
-             if (mi.videoCodec != null) {
-                 mi.mimeType = 'video/x-flv; codecs="' + mi.videoCodec + ',' + mi.audioCodec + '"';
-             }
-         } else {
-             mi.mimeType = 'video/x-flv; codecs="' + mi.audioCodec + '"';
-         }
-         if (mi.isComplete()) {
-             this._onMediaInfo(mi);
-         }
-     }
- 
-     _parseOpusAudioData(arrayBuffer, dataOffset, dataSize, tagTimestamp) {
-         let track = this._audioTrack;
- 
-         let data = new Uint8Array(arrayBuffer, dataOffset, dataSize);
-         let dts = this._timestampBase + tagTimestamp;
-         let opusSample = {unit: data, length: data.byteLength, dts: dts, pts: dts};
- 
-         track.samples.push(opusSample);
+        if (!meta) {
+            if (this._hasAudio === false && this._hasAudioFlagOverrided === false) {
+                this._hasAudio = true;
+                this._mediaInfo.hasAudio = true;
+            }
+
+            // initial metadata
+            meta = this._audioMetadata = {};
+            meta.type = 'audio';
+            meta.id = track.id;
+            meta.timescale = this._timescale;
+            meta.duration = this._duration;
+        }
+
+        // Identification Header
+        let v = new DataView(arrayBuffer, dataOffset, dataSize);
+        v.setUint8(8 + 0, 0); // set version to 0
+        let channelCount = v.getUint8(8 + 1); // Opus Header + 1
+        v.setUint16(8 + 2, v.getUint16(8 + 2, true), false); // Big Endian to Little Endian for Pre-skip
+        let samplingFrequence = v.getUint32(8 + 4, true); // Opus Header + 4
+        v.setUint32(8 + 4, v.getUint32(8 + 4, true), false); // Big Endian to Little Endian for Input Sample Rate
+        let config = new Uint8Array(arrayBuffer, dataOffset + 8, dataSize - 8);
+
+        let misc = {
+            config,
+            channelCount,
+            samplingFrequence,
+            codec: 'opus',
+            originalCodec: 'opus',
+        };
+        if (meta.config) {
+            if (buffersAreEqual(misc.config, meta.config)) {
+                // If OpusSequenceHeader is not changed, ignore it to avoid generating initialization segment repeatedly
+                Log.w(this.TAG, 'Found another OpusSequenceHeader!');
+                return;
+            } else {
+                Log.w(this.TAG, 'OpusSequenceHeader has been changed, re-generate initialization segment');
+            }
+        }
+        meta.audioSampleRate = misc.samplingFrequence;
+        meta.channelCount = misc.channelCount;
+        meta.codec = misc.codec;
+        meta.originalCodec = misc.originalCodec;
+        meta.config = misc.config;
+        // The decode result of an opus sample is 20ms
+        meta.refSampleDuration = 20;
+        Log.v(this.TAG, 'Parsed OpusSequenceHeader');
+
+        if (this._isInitialMetadataDispatched()) {
+            // Non-initial metadata, force dispatch (or flush) parsed frames to remuxer
+            if (this._dispatch && (this._audioTrack.length || this._videoTrack.length)) {
+                this._onDataAvailable(this._audioTrack, this._videoTrack);
+            }
+        } else {
+            this._audioInitialMetadataDispatched = true;
+        }
+        // then notify new metadata
+        this._dispatch = false;
+        this._onTrackMetadata('audio', meta);
+
+        let mi = this._mediaInfo;
+        mi.audioCodec = meta.originalCodec;
+        mi.audioSampleRate = meta.audioSampleRate;
+        mi.audioChannelCount = meta.channelCount;
+        if (mi.hasVideo) {
+            if (mi.videoCodec != null) {
+                mi.mimeType = 'video/x-flv; codecs="' + mi.videoCodec + ',' + mi.audioCodec + '"';
+            }
+        } else {
+            mi.mimeType = 'video/x-flv; codecs="' + mi.audioCodec + '"';
+        }
+        if (mi.isComplete()) {
+            this._onMediaInfo(mi);
+        }
+    }
+
+    _parseOpusAudioData(arrayBuffer, dataOffset, dataSize, tagTimestamp) {
+        let track = this._audioTrack;
+
+        let data = new Uint8Array(arrayBuffer, dataOffset, dataSize);
+        let dts = this._timestampBase + tagTimestamp;
+        let opusSample = {unit: data, length: data.byteLength, dts: dts, pts: dts};
+
+        track.samples.push(opusSample);
          track.length += data.length;
      }    
 
@@ -1044,7 +1053,7 @@ class FLVDemuxer {
             if (typeof meta.avcc !== 'undefined') {
                 let new_avcc = new Uint8Array(arrayBuffer, dataOffset, dataSize);
                 if (buffersAreEqual(new_avcc, meta.avcc)) {
-                    // AVCDecoderConfigurationRecord is not changed, ignore it to avoid initialization segment re-generating
+                    // AVCDecoderConfigurationRecord is not changed, ignore it to avoid generating initialization segment repeatedly
                     Log.w(this.TAG, 'Found another AVCDecoderConfigurationRecord!');
                     return;
                 } else {
@@ -1323,7 +1332,7 @@ class FLVDemuxer {
             if (typeof meta.hvcc !== 'undefined') {
                 let new_hvcc = new Uint8Array(arrayBuffer, dataOffset, dataSize);
                 if (buffersAreEqual(new_hvcc, meta.hvcc)) {
-                    // HEVCDecoderConfigurationRecord not changed, ignore it to avoid initialization segment re-generating
+                    // HEVCDecoderConfigurationRecord not changed, ignore it to avoid generating initialization segment repeatedly
                     Log.w(this.TAG, 'Found another HEVCDecoderConfigurationRecord!');
                     return;
                 } else {
@@ -1562,8 +1571,9 @@ class FLVDemuxer {
             meta.duration = this._duration;
         } else {
             if (typeof meta.av1c !== 'undefined') {
-                if (buffersAreEqual(aacData.data.config, meta.config)) {
-                    // AV1CodecConfigurationRecord  is not changed, ignore it to avoid initialization segment re-generating
+                let new_av1c = new Uint8Array(arrayBuffer, dataOffset, dataSize);
+                if (buffersAreEqual(new_av1c, meta.av1c)) {
+                    // AV1CodecConfigurationRecord  is not changed, ignore it to avoid generating initialization segment repeatedly
                     Log.w(this.TAG, 'Found another AV1CodecConfigurationRecord!');
                     return;
                 } else {
